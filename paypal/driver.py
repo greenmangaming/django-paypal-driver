@@ -20,22 +20,26 @@ from django.conf import settings
 # Exception messages
 
 TOKEN_NOT_FOUND_ERROR = (
-    "PayPal error occured. There is no TOKEN info to finish performing PayPal "
-    "payment process. We haven't charged your money yet."
+    "PayPal error occurred. There is no TOKEN info to finish performing"
+    " PayPal payment process. We haven't charged your money yet."
 )
 NO_PAYERID_ERROR = (
-    "PayPal error occured. There is no PAYERID info to finish performing "
+    "PayPal error occurred. There is no PAYERID info to finish performing "
     "PayPal payment process. We haven't charged your money yet."
 )
 GENERIC_PAYPAL_ERROR = (
-    "There occured an error while performing PayPal checkout process. We "
+    "There occurred an error while performing PayPal checkout process. We "
     "apologize for the inconvenience. We haven't charged your money yet."
 )
 GENERIC_PAYMENT_ERROR = (
     "Transaction failed. Check out your order details again."
 )
 GENERIC_REFUND_ERROR = (
-    "An error occured, we can not perform your refund request"
+    "An error occurred, we can not perform your refund request"
+)
+BILLING_AGREEMENT_ERROR = (
+    "An error occurred with your billing agreement. Authorization will be "
+    "required."
 )
 
 
@@ -74,7 +78,7 @@ class PayPal(object):
             "SIGNATURE": signature or getattr(
                 settings, "PAYPAL_SIGNATURE", None
             ),
-            "VERSION": "53.0",
+            "VERSION": "58.0",
         }
 
         # Second step is to set the API end point and redirect urls correctly.
@@ -117,6 +121,30 @@ class PayPal(object):
         else:
             return raw
 
+    def _nvp_request(self, parameters):
+        """Convenience method for making requests to keep driver DRY
+
+        :param parameters: parameters to send in the request
+        :type parameters: dictionary
+
+        :returns: value of the ACK parameter in the response, can be
+            "Success", "SuccessWithWarning", "Failure", "FailureWithWarning"
+        :rtype: string
+        """
+        query_string = self.signature + urllib.urlencode(parameters or {})
+        response = urllib2.urlopen(self.NVP_API_ENDPOINT, query_string).read()
+        response_tokens = {}
+        for token in response.split('&'):
+            response_tokens[token.split("=")[0]] = token.split("=")[1]
+        for key in response_tokens.keys():
+            response_tokens[key] = urllib.unquote(response_tokens[key])
+
+        state = self._get_value_from_qs(response_tokens, "ACK")
+        self.response = response_tokens
+        self.api_response = response_tokens
+
+        return state
+
     def paypal_url(self, token=None):
         """
         Returns a 'redirect url' for PayPal payments.
@@ -139,6 +167,10 @@ class PayPal(object):
         To set up an Express Checkout transaction, you must invoke the
         SetExpressCheckout API to provide sufficient information to initiate
         the payment flow and redirect to PayPal if the operation was successful
+
+        Use TOKEN to redirect the browser to the express checkout pay, e.g.
+            https://www.sandbox.paypal.com/cgi-bin/webscr?
+              cmd=_express-checkout&token=TOKEN
 
         @currency: Look at 'https://cms.paypal.com/us/cgi-bin/?
                    cmd=_render-content&content_ID=developer/
@@ -187,15 +219,6 @@ class PayPal(object):
             response_dict, "L_LONGMESSAGE0"
         )
         return False
-
-    """
-    If SetExpressCheckout is successfull use TOKEN to redirect to the browser
-    to the address BELOW:
-
-     - https://www.sandbox.paypal.com/cgi-bin/webscr?
-        cmd=_express-checkout&token=TOKEN (for development only URL)
-
-    """
 
     def GetExpressCheckoutDetails(self, token):
         """
@@ -273,21 +296,12 @@ class PayPal(object):
             'PAYERID': payerid,
         }
         parameters.update(kwargs)
-        query_string = self.signature + urllib.urlencode(parameters)
-        response = urllib2.urlopen(self.NVP_API_ENDPOINT, query_string).read()
-        response_tokens = {}
-        for token in response.split('&'):
-            response_tokens[token.split("=")[0]] = token.split("=")[1]
-        for key in response_tokens.keys():
-            response_tokens[key] = urllib.unquote(response_tokens[key])
+        state = self._nvp_request(parameters)
 
-        state = self._get_value_from_qs(response_tokens, "ACK")
-        self.response = response_tokens
-        self.api_response = response_tokens
         if not state in ["Success", "SuccessWithWarning"]:
             self.doexpresscheckoutpaymenterror = GENERIC_PAYMENT_ERROR
             self.apierror = self._get_value_from_qs(
-                response_tokens, "L_LONGMESSAGE0"
+                self.response, "L_LONGMESSAGE0"
             )
             return False
         return True
@@ -314,53 +328,111 @@ class PayPal(object):
         }
 
         parameters.update(kwargs)
-        query_string = self.signature + urllib.urlencode(parameters)
-        response = urllib2.urlopen(self.NVP_API_ENDPOINT, query_string).read()
-        response_tokens = {}
-        for token in response.split('&'):
-            response_tokens[token.split("=")[0]] = token.split("=")[1]
-        for key in response_tokens.keys():
-            response_tokens[key] = urllib.unquote(response_tokens[key])
-
-        state = self._get_value_from_qs(response_tokens, "ACK")
-        self.response = response_tokens
-        self.api_response = response_tokens
+        state = self._nvp_request(parameters)
 
         if not state in ["Success", "SuccessWithWarning"]:
             self.doexpresscheckoutpaymenterror = GENERIC_PAYMENT_ERROR
             self.apierror = self._get_value_from_qs(
-                response_tokens, "L_LONGMESSAGE0"
+                self.response, "L_LONGMESSAGE0"
             )
             return False
         return True
 
-    def DoVoid(
+    def DoReferenceTransaction(
         self,
-        authorizationid,
+        referenceid,
+        paymentaction,
+        amount,
+        currency,
         **kwargs
     ):
+        """
+        If you have a Billing Agreement you can do a reference transaction by
+        passing in the agreement as a reference id. You're strongly recommended
+        to supply the IPADDRESS (as a kwarg) to help detect fraud.
+
+        :param referenceid: The Billing Agreement secret, also known as the
+                            BILLINGAGREEMENTID
+        :type referenceid: string
+
+        :param paymentaction: Authorization/Sale/Order
+        :type paymentaction: string
+
+        :param amount: Amount to charge
+        :type amount: string
+
+        :param currency: 3 letter currency code
+        :type currency: string
+
+        :param kwargs: Additional arguments to be sent with this request
+        :type kwards: dict
+
+        :return: False if the transaction is not marked Success or
+                 SuccessWithWarning, True otherwise.
+        :rtype: bool
+        """
+        parameters = {
+            'METHOD': 'DoReferenceTransaction',
+            'REFERENCEID': referenceid,
+            'PAYMENTACTION': paymentaction,
+            'AMT': amount,
+            'CURRENCYCODE': currency,
+        }
+
+        parameters.update(kwargs)
+        state = self._nvp_request(parameters)
+
+        if not state in ["Success", "SuccessWithWarning"]:
+            self.doreferencepaymenterror = GENERIC_PAYMENT_ERROR
+            self.apierror = self._get_value_from_qs(
+                self.response, "L_LONGMESSAGE0"
+            )
+            return False
+        return True
+
+    def UpdateAuthorization(self, referenceid, **kwargs):
+        """
+        Endpoint to update a user's billing agreement. You can use this
+        function as is to get the status of the Billing Agreement, simply
+        pass in a referenceId, and check the value of BillingAgreementID
+
+        :param referenceid: The Billing Agreement secret
+        :type referenceid: string
+
+        :return: False if the transaction is not marked Success or
+                 SuccessWithWarning True otherwise.
+        :rtype: bool
+        """
+        parameters = {
+            'METHOD': 'BillAgreementUpdate',
+            'REFERENCEID': referenceid,
+        }
+
+        parameters.update(kwargs)
+        state = self._nvp_request(parameters)
+
+        if not state in ["Success", "SuccessWithWarning"]:
+            self.billagreementupdateerror = BILLING_AGREEMENT_ERROR
+            self.apierror = self._get_value_from_qs(
+                self.response, "L_LONGMESSAGE0"
+            )
+            return False
+
+        return True
+
+    def DoVoid(self, authorizationid, **kwargs):
         parameters = {
             'METHOD': 'DoVoid',
             'AUTHORIZATIONID': authorizationid,
         }
 
         parameters.update(kwargs)
-        query_string = self.signature + urllib.urlencode(parameters)
-        response = urllib2.urlopen(self.NVP_API_ENDPOINT, query_string).read()
-        response_tokens = {}
-        for token in response.split('&'):
-            response_tokens[token.split("=")[0]] = token.split("=")[1]
-        for key in response_tokens.keys():
-            response_tokens[key] = urllib.unquote(response_tokens[key])
-
-        state = self._get_value_from_qs(response_tokens, "ACK")
-        self.response = response_tokens
-        self.api_response = response_tokens
+        state = self._nvp_request(parameters)
 
         if not state in ["Success", "SuccessWithWarning"]:
             self.doexpresscheckoutpaymenterror = GENERIC_PAYMENT_ERROR
             self.apierror = self._get_value_from_qs(
-                response_tokens, "L_LONGMESSAGE0"
+                self.response, "L_LONGMESSAGE0"
             )
             return False
         return True
@@ -417,18 +489,9 @@ class PayPal(object):
             }
             parameters.update(extra_values)
 
-        query_string = self.signature + urllib.urlencode(parameters)
-        response = urllib2.urlopen(self.NVP_API_ENDPOINT, query_string).read()
-        response_tokens = {}
-        for token in response.split('&'):
-            response_tokens[token.split("=")[0]] = token.split("=")[1]
+        state = self._nvp_request(parameters)
+        self.refund_response = self.response
 
-        for key in response_tokens.keys():
-            response_tokens[key] = urllib.unquote(response_tokens[key])
-
-        state = self._get_value_from_qs(response_tokens, "ACK")
-        self.refund_response = response_tokens
-        self.api_response = response_tokens
         if not state in ["Success", "SuccessWithWarning"]:
             self.refundtransactionerror = GENERIC_REFUND_ERROR
             return False
