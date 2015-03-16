@@ -20,8 +20,8 @@ from django.conf import settings
 # Exception messages
 
 TOKEN_NOT_FOUND_ERROR = (
-    "PayPal error occurred. There is no TOKEN info to finish performing"
-    " PayPal payment process. We haven't charged your money yet."
+    "PayPal error occurred. There is no TOKEN info to finish performing "
+    "PayPal payment process. We haven't charged your money yet."
 )
 NO_PAYERID_ERROR = (
     "PayPal error occurred. There is no PAYERID info to finish performing "
@@ -69,7 +69,8 @@ class PayPal(object):
         self,
         username=None,
         password=None,
-        signature=None
+        signature=None,
+        api_version=None
     ):
 
         self.credientials = {
@@ -78,7 +79,7 @@ class PayPal(object):
             "SIGNATURE": signature or getattr(
                 settings, "PAYPAL_SIGNATURE", None
             ),
-            "VERSION": "58.0",
+            "VERSION": api_version or "53.0",
         }
 
         # Second step is to set the API end point and redirect urls correctly.
